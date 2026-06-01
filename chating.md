@@ -100,7 +100,7 @@ LED 10개의 역할을 무엇으로 정할지
 구글 스프레드시트 전송은 Pico W의 WiFi로 할 텐데, 이 부분은 골격이 잘 돌아가는 걸 확인한 뒤에 붙이는 게 좋아요
 우선 조명 감지를 어떻게 할 생각인지, 그리고 LED 10개를 무슨 용도로 쓸지 알려주면 다음 단계 코드를 같이 발전시켜볼까요?
 
-# 아, 맞다. 조도 센서도 활용할거야.
+### 아, 맞다. 조도 센서도 활용할거야.
 좋아요! 조도 센서를 추가하면 "불이 켜져있는지" 판단할 수 있으니 핵심 로직이 완성되겠네요. 그럼 조도 센서를 어떤 걸로 쓸지 정해야 코드를 정확히 짤 수 있어요.
 
 먼저 정할 것: 어떤 조도 센서인가요?
@@ -132,7 +132,7 @@ SCD30과 같은 I2C 버스 공유 가능 (주소가 다르면 OK)
 
 그리고 한 가지 더 생각해보면 좋을 질문: "불은 꺼져있는데 온도가 낮다" 외에, 조도 센서와 CO₂ 센서를 조합하면 어떤 다른 낭비 상황도 잡아낼 수 있을까요? (힌트: CO₂는 사람이 있으면 올라가요 🙂)
 
-# 일단 지금은 여러 피코들로 하나의 스프레드시트에 전송하는게 일단 내 목표거든? 일단 코드부터 구성해보자.
+### 일단 지금은 여러 피코들로 하나의 스프레드시트에 전송하는게 일단 내 목표거든? 일단 코드부터 구성해보자.
  좋아요! "여러 피코 → 하나의 스프레드시트"가 목표라면, 코드를 짜기 전에 딱 두 가지만 정하면 깔끔하게 진행돼요.
 
 먼저 정할 2가지
@@ -485,7 +485,7 @@ while True:
 web.py로 웹앱을 따로 만들고 싶은 이유/목적이 뭔가요? (위 A/B 중 어디에 가까운지)
 그리고 한 가지 — 위 main.py에서 connect_wifi()가 실패하면 어떻게 동작해야 좋을까요? (생각해보면 재밌는 부분이에요 🙂)
 
-# 일단은 A 대안으로 생각 해두고 있었어. 일단 스프레드시트와 연동을 할 메인 코드를 짜보자 이제
+### 일단은 A 대안으로 생각 해두고 있었어. 일단 스프레드시트와 연동을 할 메인 코드를 짜보자 이제
 좋아요! A 방식(시트에서 읽어와 웹앱에 표시)으로 가되, 일단 지금은 **"피코 → 구글 시트로 쓰기"**가 제대로 되는 메인 흐름부터 완성하는 게 맞아요. 읽어오는 건 그게 잘 돌아간 다음에 붙이면 되니까요.
 
 그런데 피코 코드를 돌리려면 **구글 시트 쪽에서 데이터를 받아줄 "문(門)"**을 먼저 만들어야 해요. 그게 없으면 SHEET_URL이 빈 채로 남아서 전송이 안 되거든요.
@@ -568,3 +568,237 @@ Apps Script 웹앱부터 만들기 (위 1~3단계)
 Apps Script 웹앱 만드는 단계, 한번 직접 해볼 수 있겠어요? 막히는 부분 있으면 어디서 막혔는지 알려주세요.
 혹시 테스트할 때 진짜 센서 없이 가짜 데이터로 먼저 전송 테스트를 해보고 싶나요? (그러면 센서 연결 문제와 전송 문제를 분리해서 디버깅할 수 있어서 추천해요 🙂)
 어떻게 진행할까요?
+
+### https://script.google.com/macros/s/AKfycbwssGqCtO0_EDCUJRwkydoIk_ut_uHFfomZwEpu7dxOBftMUGZgg7r_AwaMavP7DtNLCw/exec 여기 시트 URL 이야.
+좋아요, URL 받았어요! 그럼 이걸 wifi_config.py에 넣고, 바로 시트 전송이 잘 되는지 테스트부터 해봐요.
+
+그런데 아까 제안했던 것처럼, 처음부터 모든 센서를 다 연결해서 테스트하면 문제가 생겼을 때 "센서 문제인지, 와이파이 문제인지, 시트 전송 문제인지" 구분이 안 돼요. 그래서 가짜 데이터로 전송만 먼저 테스트하는 걸 추천해요.
+
+1단계: wifi_config.py 업데이트
+python
+복사
+WIFI_NETWORKS = {
+    "U+Net1DFB": "8F9B6B21M!",
+    "app": "20242024"
+}
+
+SHEET_URL = "https://script.google.com/macros/s/AKfycbwssGqCtO0_EDCUJRwkydoIk_ut_uHFfomZwEpu7dxOBftMUGZgg7r_AwaMavP7DtNLCw/exec"
+
+CLASS_ID = "1-3"   # 피코마다 수정
+2단계: 전송 테스트 전용 코드 (test_send.py)
+센서 없이 가짜 데이터로 시트 전송만 확인하는 코드예요. 이걸 먼저 돌려보세요:
+
+python
+복사
+import time
+import network
+import urequests
+import wifi_config
+
+
+def connect_wifi():
+    wlan = network.WLAN(network.STA_IF)
+    wlan.active(True)
+
+    available = [w[0].decode() for w in wlan.scan()]
+    print("주변 WiFi:", available)
+
+    for ssid, pw in wifi_config.WIFI_NETWORKS.items():
+        if ssid in available:
+            print("연결 시도:", ssid)
+            wlan.connect(ssid, pw)
+            for _ in range(15):
+                if wlan.isconnected():
+                    print("연결 성공! IP:", wlan.ifconfig()[0])
+                    return wlan
+                time.sleep(1)
+    print("연결 가능한 WiFi 없음")
+    return None
+
+
+def send_to_sheet(co2, temp, hum, gas, light_value, status):
+    try:
+        data = {
+            "class": wifi_config.CLASS_ID,
+            "co2": co2,
+            "temp": temp,
+            "hum": hum,
+            "gas": gas,
+            "light": light_value,
+            "status": status
+        }
+        headers = {"Content-Type": "application/json"}
+        res = urequests.post(wifi_config.SHEET_URL, json=data, headers=headers)
+        print("전송 응답:", res.status_code, res.text)
+        res.close()
+    except Exception as e:
+        print("전송 실패:", e)
+
+
+# ===== 테스트 실행 =====
+wlan = connect_wifi()
+
+if wlan:
+    print("가짜 데이터 전송 테스트 시작!")
+    # 가짜 데이터 한 번 보내기
+    send_to_sheet(
+        co2=650.5,
+        temp=23.4,
+        hum=45.2,
+        gas=12000,
+        light_value=28000,
+        status="테스트"
+    )
+    print("테스트 끝! 시트를 확인해보세요.")
+else:
+    print("와이파이 연결 안 됨")
+확인할 것
+이 코드를 돌리고 나서:
+
+셸(콘솔)에 뭐가 출력되는지 봐주세요
+
+연결 성공! IP: ... 가 뜨나요?
+전송 응답: 200 ... 처럼 응답이 오나요?
+구글 스프레드시트에 새 줄이 추가됐나요?
+
+시간, 1-3, 650.5, 23.4 ... 이런 줄이 생겼는지
+이 두 가지 결과를 알려주세요. 그 결과에 따라:
+
+✅ 잘 되면 → 진짜 센서 코드를 붙여서 완성
+❌ 안 되면 → 출력된 에러 메시지를 보고 같이 원인을 찾기
+어떤 결과가 나왔나요?
+
+### 음, 일단 연결은 잘되고, 테스트가 끝났다고 잘 뜨는데, 구글 스프레드시트에는 변화가 없어.
+좋은 단서예요! "전송은 됐다고 뜨는데 시트에 안 쌓인다" → 이건 아주 흔한 케이스라 차근차근 짚어보면 원인을 찾을 수 있어요.
+
+먼저 정확히 무슨 응답이 왔는지 확인하는 게 핵심이에요. 셸(콘솔)에 이 줄이 어떻게 출력됐나요?
+
+code
+복사
+전송 응답: ???  ???
+이 부분을 정확히 알려주면 원인이 거의 바로 보여요. 그동안 가능성이 높은 원인들을 같이 점검해봐요.
+
+의심 포인트 1: 응답이 200인데 본문이 이상한 경우 ⭐가장 흔함
+전송 응답이 200인데 시트에 안 쌓이면, 십중팔구 구글 로그인 페이지 HTML이 응답으로 온 거예요. 이건 배포 권한 설정 문제예요.
+
+다시 한번 확인해주세요 (이게 제일 의심돼요):
+
+Apps Script → 배포 → 배포 관리
+현재 배포의 액세스 권한이 **"모든 사용자"**로 되어 있나요?
+"나만" 이나 "Google 계정이 있는 모든 사용자"로 되어 있으면 → 피코가 접근 못 해요
+⚠️ 여기서 자주 하는 실수: 권한을 바꾸려면 새 배포를 하거나, 기존 배포를 수정(연필 아이콘) → 버전을 "새 버전"으로 다시 배포해야 적용돼요. 그냥 설정만 바꾸면 반영이 안 될 수 있어요.
+
+의심 포인트 2: Apps Script 코드가 저장만 되고 배포에 반영 안 됨
+doPost 코드를 작성한 뒤에, 그 코드 버전으로 다시 배포했나요?
+
+코드를 고친 후 배포를 안 하면, 옛날(빈) 버전이 그대로 돌아가요
+배포 → 배포 관리 → 수정 → 버전: "새 버전" 선택 → 배포
+의심 포인트 3: 진짜로 doPost가 실행됐는지 직접 확인
+Apps Script에서 로그를 볼 수 있어요:
+
+Apps Script 편집기 왼쪽 → 실행 (시계 모양 아이콘) 메뉴
+피코가 전송을 보낸 시각에 doPost 실행 기록이 있나요?
+있는데 실패 → 코드 문제
+아예 기록 없음 → 피코 요청이 구글에 안 닿은 것 (권한 문제 가능성 큼)
+다음에 해볼 것
+우선 응답 내용을 더 자세히 보기 위해, 테스트 코드의 출력을 살짝 바꿔서 다시 돌려봐요:
+
+python
+복사
+        res = urequests.post(wifi_config.SHEET_URL, json=data, headers=headers)
+        print("=== 상태 코드 ===", res.status_code)
+        print("=== 응답 본문 ===")
+        print(res.text)
+        res.close()
+이렇게 하고 다시 실행해서, 응답 본문에 뭐가 나오는지 그대로 복사해서 알려주세요.
+
+{"result":"success"} 같은 게 나오면 → 코드는 맞고 다른 문제
+HTML 같은 긴 글(<!DOCTYPE html>...)이 나오면 → 권한 설정 문제 확정
+어떤 게 나오는지 보여주세요! 🔍
+
+### 전송 응답이 400이야
+오, 400 응답이면 단서가 명확해요! 👍
+
+400 = Bad Request, 즉 "구글 서버까지는 도달했는데, 보낸 데이터의 형식을 구글이 제대로 이해하지 못했다"는 뜻이에요. 권한 문제(보통 200에 로그인 HTML)는 아니고, 데이터 전달 방식 문제일 가능성이 커요.
+
+가장 흔한 원인: json= 방식과 Apps Script의 충돌
+피코의 urequests에서 json=data로 보내면, 내부적으로 데이터를 JSON으로 바꿔서 보내요. 그런데 구글 Apps Script가 이걸 받을 때 e.postData.contents로 파싱하는 과정에서 헤더나 형식이 안 맞아 400이 나는 경우가 많아요.
+
+이걸 해결하는 가장 확실한 방법은 직접 문자열로 변환해서 보내는 것이에요.
+
+수정한 전송 함수
+python
+복사
+import ujson   # 상단에 추가
+
+def send_to_sheet(co2, temp, hum, gas, light_value, status):
+    try:
+        data = {
+            "class": wifi_config.CLASS_ID,
+            "co2": co2,
+            "temp": temp,
+            "hum": hum,
+            "gas": gas,
+            "light": light_value,
+            "status": status
+        }
+        # 딕셔너리를 JSON 문자열로 직접 변환
+        payload = ujson.dumps(data)
+        headers = {"Content-Type": "application/json"}
+
+        res = urequests.post(wifi_config.SHEET_URL, data=payload, headers=headers)
+        print("=== 상태 코드 ===", res.status_code)
+        print("=== 응답 본문 ===")
+        print(res.text)
+        res.close()
+    except Exception as e:
+        print("전송 실패:", e)
+바뀐 핵심: json=data → data=payload (직접 문자열로 변환해서 보냄)
+
+그래도 400이 나온다면: Apps Script 쪽도 점검
+만약 위로도 안 되면, Apps Script 코드가 e.postData를 못 읽는 상황일 수 있어요. 좀 더 방어적으로 받도록 doPost를 살짝 고쳐봐요:
+
+javascript
+복사
+function doPost(e) {
+  try {
+    var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+
+    // postData가 없을 때 대비
+    if (!e.postData || !e.postData.contents) {
+      return ContentService
+        .createTextOutput(JSON.stringify({result: "no data"}))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+
+    var data = JSON.parse(e.postData.contents);
+
+    sheet.appendRow([
+      new Date(),
+      data.class,
+      data.co2,
+      data.temp,
+      data.hum,
+      data.gas,
+      data.light,
+      data.status
+    ]);
+
+    return ContentService
+      .createTextOutput(JSON.stringify({result: "success"}))
+      .setMimeType(ContentService.MimeType.JSON);
+
+  } catch (err) {
+    return ContentService
+      .createTextOutput(JSON.stringify({result: "error", message: err.toString()}))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+}
+⚠️ 이렇게 Apps Script 코드를 고쳤다면, 반드시 다시 배포하세요! (배포 → 배포 관리 → 수정 → 버전 "새 버전" → 배포)
+
+진행 순서
+먼저 피코 쪽 전송 함수만 위처럼 고쳐서 다시 실행 (가장 가능성 높음)
+그래도 400이면 → **응답 본문(=== 응답 본문 === 아래에 나오는 글)**을 복사해서 알려주세요
+그 응답 본문에 보통 에러 이유가 적혀 있어서, 그걸 보면 원인을 딱 짚을 수 있어요.
+
+먼저 1번 해보고 결과가 어떻게 나오는지 알려줄래요? 🙂
