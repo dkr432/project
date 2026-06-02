@@ -2,7 +2,8 @@ print(">>> 1. 코드 시작됨!")
 
 import time
 import network
-import urequests
+import usocket as socket
+import ussl as ssl
 import ujson
 import wifi_config
 
@@ -30,7 +31,50 @@ def connect_wifi():
     return None
 
 
-# ---------- 구글 시트 전송 (리다이렉트 직접 처리) ----------
+# ---------- URL 분해 ----------
+def parse_url(url):
+    # https://host/path 형태를 분해
+    url = url.split("://", 1)[1]      # https:// 제거
+    host, path = url.split("/", 1)    # 호스트와 경로 분리
+    return host, "/" + path
+
+
+# ---------- HTTPS POST (리다이렉트 직접 처리) ----------
+def https_post(url, payload):
+    host, path = parse_url(url)
+    print(">>> 접속 호스트:", host)
+
+    # 443 포트(HTTPS)로 연결
+    addr = socket.getaddrinfo(host, 443)[0][-1]
+    s = socket.socket()
+    s.connect(addr)
+    s = ssl.wrap_socket(s, server_hostname=host)
+
+    # HTTP 요청 직접 작성
+    request = (
+        "POST " + path + " HTTP/1.1\r\n"
+        "Host: " + host + "\r\n"
+        "Content-Type: application/json\r\n"
+        "Content-Length: " + str(len(payload)) + "\r\n"
+        "Connection: close\r\n"
+        "\r\n"
+        + payload
+    )
+    s.write(request.encode())
+
+    # 응답 받기
+    response = b""
+    while True:
+        chunk = s.read(512)
+        if not chunk:
+            break
+        response += chunk
+    s.close()
+
+    return response.decode("utf-8", "ignore")
+
+
+# ---------- 시트 전송 (리다이렉트 따라가기) ----------
 def send_to_sheet(co2, temp, hum, gas, light_value, status):
     print(">>> 5. 전송 함수 진입")
     try:
@@ -46,31 +90,35 @@ def send_to_sheet(co2, temp, hum, gas, light_value, status):
         payload = ujson.dumps(data)
         print(">>> 6. JSON 변환 완료:", payload)
 
-        headers = {"Content-Type": "application/json"}
-
         url = wifi_config.SHEET_URL
-        print(">>> 7. 1차 전송 시작...")
+        print(">>> 7. 1차 전송...")
+        response = https_post(url, payload)
 
-        # ★ 핵심: 자동 리다이렉트 끄기
-        res = urequests.post(url, data=payload, headers=headers, allow_redirects=False)
-        print(">>> 8. 1차 응답 상태:", res.status_code)
+        # 응답 헤더에서 상태/리다이렉트 확인
+        status_line = response.split("\r\n", 1)[0]
+        print(">>> 8. 1차 응답:", status_line)
 
-        # 302/307 등 리다이렉트면, 새 주소로 다시 보내기
-        if res.status_code in (301, 302, 303, 307, 308):
-            new_url = res.headers.get("Location")
-            print(">>> 9. 리다이렉트 발견! 새 주소:", new_url)
-            res.close()
+        # 리다이렉트(302 등)면 Location 찾아서 다시 보내기
+        if "302" in status_line or "301" in status_line or "307" in status_line:
+            new_url = None
+            for line in response.split("\r\n"):
+                if line.lower().startswith("location:"):
+                    new_url = line.split(":", 1)[1].strip()
+                    break
+            print(">>> 9. 리다이렉트! 새 주소:", new_url)
 
-            # 새 주소로 다시 POST
-            res2 = urequests.post(new_url, data=payload, headers=headers)
-            print(">>> 10. 2차 응답 상태:", res2.status_code)
-            print("=== 응답 본문 ===")
-            print(res2.text)
-            res2.close()
+            if new_url:
+                response2 = https_post(new_url, payload)
+                status_line2 = response2.split("\r\n", 1)[0]
+                print(">>> 10. 2차 응답:", status_line2)
+                # 본문만 추출해서 출력
+                body = response2.split("\r\n\r\n", 1)[-1]
+                print("=== 응답 본문 ===")
+                print(body[-300:])  # 뒤쪽 일부만
         else:
+            body = response.split("\r\n\r\n", 1)[-1]
             print("=== 응답 본문 ===")
-            print(res.text)
-            res.close()
+            print(body[-300:])
 
     except Exception as e:
         print(">>> 전송 중 에러:", e)
