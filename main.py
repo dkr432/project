@@ -9,6 +9,7 @@ import wifi_config
 print(">>> 2. import 성공!")
 
 
+# ---------- WiFi 연결 ----------
 def connect_wifi():
     wlan = network.WLAN(network.STA_IF)
     wlan.active(True)
@@ -29,6 +30,7 @@ def connect_wifi():
     return None
 
 
+# ---------- 구글 시트 전송 ----------
 def send_to_sheet(co2, temp, hum, gas, light_value, status):
     print(">>> 5. 전송 함수 진입")
     try:
@@ -44,7 +46,8 @@ def send_to_sheet(co2, temp, hum, gas, light_value, status):
         payload = ujson.dumps(data)
         print(">>> 6. JSON 변환 완료:", payload)
 
-        headers = {"Content-Type": "application/json"}
+        # text/plain 으로 전송 (리다이렉트 문제 회피)
+        headers = {"Content-Type": "text/plain"}
         print(">>> 7. 전송 시작...")
 
         res = urequests.post(wifi_config.SHEET_URL, data=payload, headers=headers)
