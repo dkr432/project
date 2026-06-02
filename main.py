@@ -2,10 +2,19 @@ print(">>> 1. 코드 시작됨!")
 
 import time
 import network
-import usocket as socket
-import ussl as ssl
 import ujson
 import wifi_config
+
+# 펌웨어 버전에 따라 모듈 이름이 달라서 둘 다 대비
+try:
+    import usocket as socket
+except ImportError:
+    import socket
+
+try:
+    import ussl as ssl
+except ImportError:
+    import ssl
 
 print(">>> 2. import 성공!")
 
@@ -33,24 +42,21 @@ def connect_wifi():
 
 # ---------- URL 분해 ----------
 def parse_url(url):
-    # https://host/path 형태를 분해
-    url = url.split("://", 1)[1]      # https:// 제거
-    host, path = url.split("/", 1)    # 호스트와 경로 분리
+    url = url.split("://", 1)[1]
+    host, path = url.split("/", 1)
     return host, "/" + path
 
 
-# ---------- HTTPS POST (리다이렉트 직접 처리) ----------
+# ---------- HTTPS POST ----------
 def https_post(url, payload):
     host, path = parse_url(url)
     print(">>> 접속 호스트:", host)
 
-    # 443 포트(HTTPS)로 연결
     addr = socket.getaddrinfo(host, 443)[0][-1]
     s = socket.socket()
     s.connect(addr)
     s = ssl.wrap_socket(s, server_hostname=host)
 
-    # HTTP 요청 직접 작성
     request = (
         "POST " + path + " HTTP/1.1\r\n"
         "Host: " + host + "\r\n"
@@ -62,7 +68,6 @@ def https_post(url, payload):
     )
     s.write(request.encode())
 
-    # 응답 받기
     response = b""
     while True:
         chunk = s.read(512)
@@ -94,11 +99,9 @@ def send_to_sheet(co2, temp, hum, gas, light_value, status):
         print(">>> 7. 1차 전송...")
         response = https_post(url, payload)
 
-        # 응답 헤더에서 상태/리다이렉트 확인
         status_line = response.split("\r\n", 1)[0]
         print(">>> 8. 1차 응답:", status_line)
 
-        # 리다이렉트(302 등)면 Location 찾아서 다시 보내기
         if "302" in status_line or "301" in status_line or "307" in status_line:
             new_url = None
             for line in response.split("\r\n"):
@@ -111,10 +114,9 @@ def send_to_sheet(co2, temp, hum, gas, light_value, status):
                 response2 = https_post(new_url, payload)
                 status_line2 = response2.split("\r\n", 1)[0]
                 print(">>> 10. 2차 응답:", status_line2)
-                # 본문만 추출해서 출력
                 body = response2.split("\r\n\r\n", 1)[-1]
                 print("=== 응답 본문 ===")
-                print(body[-300:])  # 뒤쪽 일부만
+                print(body[-300:])
         else:
             body = response.split("\r\n\r\n", 1)[-1]
             print("=== 응답 본문 ===")
