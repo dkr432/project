@@ -1,43 +1,42 @@
-import machine
 import time
 import network
 import urequests
 from machine import Pin, I2C, ADC
 import struct
-
-# ========== 설정 (반마다 이 부분만 수정) ==========
-CLASS_ID = "1-3"                 # 이 피코가 배치된 반
-WIFI_SSID = "와이파이이름"
-WIFI_PASSWORD = "와이파이비밀번호"
-SHEET_URL = "여기에_AppsScript_웹앱_URL"   # 나중에 채울 부분
-LIGHT_THRESHOLD = 30000          # 조도 기준값 (실측 후 조정)
-# ================================================
+import wifi_config   # 설정 불러오기
 
 # ---------- 하드웨어 설정 ----------
 i2c = I2C(0, scl=Pin(5), sda=Pin(4), freq=50000)
 SCD30_ADDR = 0x61
 
-mq2 = ADC(Pin(26))    # 가스 센서
-light = ADC(Pin(27))  # 조도 센서 (CDS)
+mq2 = ADC(Pin(26))
+light = ADC(Pin(27))
 
 led_pins = [6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
 leds = [Pin(p, Pin.OUT) for p in led_pins]
 
+LIGHT_THRESHOLD = 30000   # 실측 후 조정
 
-# ---------- WiFi 연결 ----------
+
+# ---------- WiFi 연결 (여러 개 중 자동 선택) ----------
 def connect_wifi():
     wlan = network.WLAN(network.STA_IF)
     wlan.active(True)
-    wlan.connect(WIFI_SSID, WIFI_PASSWORD)
-    print("WiFi 연결 중...", end="")
-    for _ in range(20):
-        if wlan.isconnected():
-            print(" 성공! IP:", wlan.ifconfig()[0])
-            return True
-        print(".", end="")
-        time.sleep(1)
-    print(" 실패")
-    return False
+
+    available = [w[0].decode() for w in wlan.scan()]
+    print("주변 WiFi:", available)
+
+    for ssid, pw in wifi_config.WIFI_NETWORKS.items():
+        if ssid in available:
+            print("연결 시도:", ssid)
+            wlan.connect(ssid, pw)
+            for _ in range(15):
+                if wlan.isconnected():
+                    print("연결 성공! IP:", wlan.ifconfig()[0])
+                    return wlan
+                time.sleep(1)
+    print("연결 가능한 WiFi 없음")
+    return None
 
 
 # ---------- SCD30 함수들 ----------
@@ -74,23 +73,19 @@ def show_level_on_leds(value, max_value):
         led.value(1 if i < level else 0)
 
 
-# ---------- 에너지 절약 판단 로직 ----------
+# ---------- 에너지 절약 판단 ----------
 def check_energy_waste(co2, temp, light_value):
-    """간단한 판단 로직 (앞으로 발전시킬 부분)"""
     light_on = light_value > LIGHT_THRESHOLD
-
-    # 로직1: 불 꺼짐 + 온도 낮음 -> 사람 없는데 에어컨 켜둠 의심
     if (not light_on) and (temp < 24):
         return "낭비의심: 빈 교실 냉방?"
-
     return "정상"
 
 
-# ---------- 구글 시트로 전송 ----------
+# ---------- 구글 시트 전송 ----------
 def send_to_sheet(co2, temp, hum, gas, light_value, status):
     try:
         data = {
-            "class": CLASS_ID,
+            "class": wifi_config.CLASS_ID,
             "co2": round(co2, 1),
             "temp": round(temp, 1),
             "hum": round(hum, 1),
@@ -98,8 +93,8 @@ def send_to_sheet(co2, temp, hum, gas, light_value, status):
             "light": light_value,
             "status": status
         }
-        res = urequests.post(SHEET_URL, json=data)
-        print("전송 완료:", res.text)
+        res = urequests.post(wifi_config.SHEET_URL, json=data)
+        print("전송:", res.text)
         res.close()
     except Exception as e:
         print("전송 실패:", e)
@@ -118,11 +113,9 @@ while True:
         status = check_energy_waste(co2, temp, light_value)
 
         print("[{}] CO2:{:.0f} Temp:{:.1f} Hum:{:.1f} Gas:{} Light:{} -> {}".format(
-            CLASS_ID, co2, temp, hum, gas_value, light_value, status))
+            wifi_config.CLASS_ID, co2, temp, hum, gas_value, light_value, status))
 
         show_level_on_leds(co2 - 400, 1600)
-
-        # 시트 전송 (테스트할 땐 주기를 길게)
         send_to_sheet(co2, temp, hum, gas_value, light_value, status)
 
-    time.sleep(10)  # 10초마다 (실제론 더 길게 조정)
+    time.sleep(10)
