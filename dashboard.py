@@ -4,11 +4,9 @@ import pandas as pd
 # ===== 설정 =====
 SHEET_CSV = "https://docs.google.com/spreadsheets/d/1upDHGAi-83NMU4Mo_BuE3E6MeeBoonaemNNWhLZ0i8E/export?format=csv&gid=0"
 
-# 자동 새로고침 (30초마다). streamlit 최신 버전 기능 사용
 st.set_page_config(page_title="교실 에너지 모니터링", layout="wide")
 
 # 30초마다 자동 새로고침
-st_autorefresh = st.empty()
 try:
     from streamlit_autorefresh import st_autorefresh
     st_autorefresh(interval=30 * 1000, key="refresh")
@@ -17,17 +15,16 @@ except ImportError:
 
 
 # ===== 데이터 읽기 =====
-@st.cache_data(ttl=20)  # 20초간 캐시 (너무 자주 구글에 요청하지 않도록)
+@st.cache_data(ttl=20)
 def load_data():
     df = pd.read_csv(SHEET_CSV)
-    # 컬럼 이름 정리 (시트 첫 줄 헤더와 맞춰야 함!)
     df.columns = ["시간", "반", "co2", "온도", "습도", "가스", "조도", "상태"]
     return df
 
 df = load_data()
 
 
-# ===== 에너지 상태 판단 함수 =====
+# ===== 에너지 상태 판단 함수 (온도 + CO2만 사용) =====
 def check_status(row):
     temp = float(row["온도"])
     co2 = float(row["co2"])
@@ -56,12 +53,10 @@ st.header("📈 반별 상세 그래프")
 class_list = sorted(df["반"].unique().tolist())
 selected_class = st.selectbox("반을 선택하세요", class_list)
 
-# 선택한 반 데이터만 추출
 class_df = df[df["반"] == selected_class].copy()
-
 st.subheader(f"{selected_class} 데이터 ({len(class_df)}개)")
 
-# 그래프 (온도, CO2, 습도)
+# 그래프 (온도, CO2, 습도) - 조도 제외
 col1, col2 = st.columns(2)
 with col1:
     st.write("🌡️ 온도 변화")
@@ -71,18 +66,16 @@ with col1:
 with col2:
     st.write("🫁 CO₂ 변화")
     st.line_chart(class_df.set_index("시간")["co2"])
-    st.write("💡 조도 변화")
-    st.line_chart(class_df.set_index("시간")["조도"])
+    st.write("🔥 가스 변화")
+    st.line_chart(class_df.set_index("시간")["가스"])
 
 
 # ===== 하단: 모든 반 현재 상태 카드 =====
 st.header("⚡ 전체 반 에너지 상태 (한눈에 보기)")
 st.caption("각 반의 가장 최근 데이터를 기준으로 표시합니다.")
 
-# 각 반의 가장 최근 데이터만 뽑기
 latest = df.groupby("반").last().reset_index()
 
-# 카드를 가로로 4개씩 배치
 cards_per_row = 4
 rows = [latest[i:i+cards_per_row] for i in range(0, len(latest), cards_per_row)]
 
