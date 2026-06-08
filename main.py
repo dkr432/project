@@ -1,21 +1,47 @@
-from machine import I2C, Pin
-import time
+from machine import I2C, Pin, ADC
 from scd30 import SCD30
+import time
 
-# I2C 설정 (GP0=SDA, GP1=SCL)
-i2c = I2C(0, sda=Pin(0), scl=Pin(1), freq=100000)
+print(">>> 센서 테스트 시작!")
 
-# 연결된 I2C 장치 확인
-print("I2C 장치 검색:", [hex(x) for x in i2c.scan()])
+# ===== SCD30 (I2C: SDA=GP8, SCL=GP9) =====
+i2c = I2C(0, sda=Pin(8), scl=Pin(9), freq=50000)
+print(">>> SCD30 검색 중...")
 
-# SCD30 초기화
-scd = SCD30(i2c, 0x61)
+try:
+    scd = SCD30(i2c, addr=0x61)
+    print(">>> SCD30 연결 성공!")
+except SCD30.NotFoundException:
+    print(">>> 에러: SCD30을 찾을 수 없음. 배선 확인!")
+    while True:
+        time.sleep(1)
 
-print("SCD30 측정 시작... (값이 안정되려면 몇 초 걸려요)")
+scd.start_cont_measure()
+print(">>> SCD30 측정 시작")
 
+# ===== MQ-2 가스 센서 (GP26) =====
+gas_sensor = ADC(Pin(26))
+print(">>> MQ-2 준비 완료")
+
+time.sleep(2)
+
+# ===== 측정 루프 =====
 while True:
-    # 측정 데이터가 준비됐는지 확인
-    if scd.get_status_ready() == 1:
-        co2, temp, hum = scd.read_measurement()
-        print("CO2: {:.1f} ppm, 온도: {:.1f}도, 습도: {:.1f}%".format(co2, temp, hum))
+    # MQ-2 읽기
+    gas_value = gas_sensor.read_u16()
+
+    # SCD30 읽기 (데이터 준비됐을 때만)
+    if scd.get_status_ready():
+        try:
+            co2, temp, humi = scd.read_measurement()
+            print("-" * 40)
+            print("CO2 : {:.1f} ppm".format(co2))
+            print("온도: {:.1f} 도".format(temp))
+            print("습도: {:.1f} %".format(humi))
+            print("가스: {}".format(gas_value))
+        except SCD30.CRCException:
+            print("⚠️ CRC 오류 (통신 잡음, 무시 가능)")
+    else:
+        print("SCD30 데이터 대기 중... (가스: {})".format(gas_value))
+
     time.sleep(2)
