@@ -1,10 +1,8 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
 from datetime import datetime, time as dtime
 
-# ===== 기본 설정 =====
 SHEET_CSV = "https://docs.google.com/spreadsheets/d/1upDHGAi-83NMU4Mo_BuE3E6MeeBoonaemNNWhLZ0i8E/export?format=csv&gid=0"
 
 st.set_page_config(page_title="교실 에너지 모니터링", page_icon="🌍", layout="wide")
@@ -17,9 +15,8 @@ except ImportError:
 
 
 # ========================================
-# 일정 정의 (조회/교시/쉬는시간/점심/종례)
+# 일정 정의
 # ========================================
-# 기본 일과 (월·수·금: 6교시 + 종례 15:00~15:10)
 SCHEDULE_6 = [
     ("조회",     dtime(8, 10),  dtime(8, 20),  "homeroom"),
     ("1교시",   dtime(8, 20),  dtime(9, 10),  "class"),
@@ -35,8 +32,6 @@ SCHEDULE_6 = [
     ("6교시",   dtime(14, 10), dtime(15, 0),  "class"),
     ("종례",     dtime(15, 0),  dtime(15, 10), "homeroom"),
 ]
-
-# 화·목: 7교시 + 종례 15:40~15:50
 SCHEDULE_7 = [
     ("조회",     dtime(8, 10),  dtime(8, 20),  "homeroom"),
     ("1교시",   dtime(8, 20),  dtime(9, 10),  "class"),
@@ -54,15 +49,12 @@ SCHEDULE_7 = [
     ("7교시",   dtime(15, 10), dtime(16, 0),  "class"),
     ("종례",     dtime(16, 0),  dtime(16, 10), "homeroom"),
 ]
-
-# 요일별 일과표 (월=0 ~ 금=4)
 DAY_SCHEDULE = {0: SCHEDULE_6, 1: SCHEDULE_7, 2: SCHEDULE_6, 3: SCHEDULE_7, 4: SCHEDULE_6}
-
 WEEKDAY_KR = ["월", "화", "수", "목", "금", "토", "일"]
 
 
 # ========================================
-# 시간표 (2-3반)
+# 시간표
 # ========================================
 TIMETABLE = {
     "2-3": {
@@ -78,35 +70,24 @@ TIMETABLE = {
                "5교시": "자율", "6교시": "자율"},
     },
 }
-
 MOVING_SUBJECTS = ["스포츠 생활A", "스포츠 생활B"]
 
 
-# ========================================
-# 현재 일정 찾기
-# ========================================
 def get_current_slot(now):
-    """현재 (일정이름, 종류) 반환. 종류: class/break/lunch/homeroom/after/weekend"""
     weekday = now.weekday()
     if weekday >= 5:
         return "주말", "weekend"
     now_t = now.time()
     schedule = DAY_SCHEDULE[weekday]
-
-    # 일과 시작 전
     if now_t < schedule[0][1]:
         return "등교 전", "before"
-
     for name, start, end, kind in schedule:
         if start <= now_t < end:
             return name, kind
-
-    # 모든 일정 끝남
     return "방과후", "after"
 
 
 def get_subject(class_id, now, slot_name):
-    """현재 교시 과목 반환 (교시일 때만)"""
     if "교시" not in slot_name:
         return None
     weekday = now.weekday()
@@ -116,9 +97,6 @@ def get_subject(class_id, now, slot_name):
     return TIMETABLE.get(class_id, {}).get(day, {}).get(slot_name, None)
 
 
-# ========================================
-# 데이터 로드
-# ========================================
 @st.cache_data(ttl=20)
 def load_data():
     df = pd.read_csv(SHEET_CSV)
@@ -136,15 +114,11 @@ df = load_data()
 def check_status(temp, co2, class_id, now):
     if pd.isna(temp):
         return "❓ 측정실패", "데이터 없음", "gray"
-
     slot_name, kind = get_current_slot(now)
     subject = get_subject(class_id, now, slot_name)
     people = co2 >= 600
-
-    # 이동수업인데 냉방 켜둠
     if subject in MOVING_SUBJECTS and temp < 24:
         return "🔴 이동수업 냉방 낭비!", f"{subject} 시간인데 냉방 켜둠", "red"
-
     if temp >= 29:
         return "⚪ 냉방 안 함", "온도 높음", "orange"
     elif temp < 22:
@@ -156,189 +130,264 @@ def check_status(temp, co2, class_id, now):
         return "🟢 정상", "적정 온도", "green"
 
 
-# 카드 색상 매핑
 COLOR_HEX = {
-    "green":  "#2e7d32",
-    "red":    "#c62828",
-    "gold":   "#f9a825",
-    "orange": "#ef6c00",
-    "gray":   "#757575",
+    "green": "#2e7d32", "red": "#c62828", "gold": "#f9a825",
+    "orange": "#ef6c00", "gray": "#757575",
 }
 
 
 # ========================================
-# 디자인 CSS (밝은 지구/하늘 테마 + 애니메이션)
+# 에너지 점수 로직 (정교화)
+# ========================================
+def energy_score(class_id, df_class, now):
+    """
+    여러 요소를 종합해 0~100점 계산.
+    - 온도 적정성 (50점): 24~26도가 만점, 멀어질수록 감점
+    - 환기 적정성 (20점): CO2가 너무 높으면(환기 안함) 감점
+    - 이동수업 낭비 (30점 감점): 이동수업인데 냉방 켜둠
+    - 안정성: 온도 변동이 심하면 약간 감점
+    """
+    if df_class["온도"].notna().sum() == 0:
+        return 0, {}
+
+    latest = df_class.iloc[-1]
+    temp = latest["온도"]
+    co2 = latest["co2"]
+
+    detail = {}
+
+    # 1) 온도 점수 (50점 만점) — 24~26도 적정
+    if 24 <= temp <= 26:
+        temp_score = 50
+    else:
+        # 적정 범위에서 벗어난 만큼 감점 (1도당 8점)
+        if temp < 24:
+            gap = 24 - temp
+        else:
+            gap = temp - 26
+        temp_score = max(0, 50 - gap * 8)
+    detail["온도"] = round(temp_score, 1)
+
+    # 2) 환기 점수 (20점 만점) — CO2 적정
+    if co2 <= 1000:
+        vent_score = 20
+    elif co2 <= 1500:
+        vent_score = 12
+    elif co2 <= 2000:
+        vent_score = 6
+    else:
+        vent_score = 0
+    detail["환기"] = vent_score
+
+    # 3) 기본 점수 (20점) - 측정 정상 작동
+    base_score = 20
+    detail["측정"] = base_score
+
+    # 4) 이동수업 낭비 감점 (최대 -30)
+    slot_name, _ = get_current_slot(now)
+    subject = get_subject(class_id, now, slot_name)
+    penalty = 0
+    if subject in MOVING_SUBJECTS and temp < 24:
+        penalty = 30
+        detail["이동수업 낭비"] = -penalty
+
+    # 5) 온도 안정성 (최대 -10) - 최근 데이터 변동성
+    recent = df_class["온도"].dropna().tail(10)
+    if len(recent) >= 3:
+        volatility = recent.std()
+        if volatility > 2:
+            stab_penalty = min(10, (volatility - 2) * 5)
+            detail["변동성"] = -round(stab_penalty, 1)
+            penalty += stab_penalty
+
+    total = temp_score + vent_score + base_score - penalty
+    total = max(0, min(100, total))
+    return round(total, 1), detail
+
+
+# ========================================
+# CSS (글씨 외곽선 + 회전 지구 + hover + 애니메이션 시계)
 # ========================================
 st.markdown("""
 <style>
-/* ===== 밝은 하늘 배경 (낮의 지구) ===== */
 .stApp {
-    background:
-        radial-gradient(circle at 80% 15%, rgba(255,241,150,0.6) 0%, rgba(255,241,150,0) 12%),
-        linear-gradient(180deg, #ade4ff 0%, #c9efff 35%, #e3f7ff 70%, #f0fbe5 100%);
+    background: linear-gradient(180deg, #aee2ff 0%, #cdeeff 40%, #e6f7ff 70%, #f2fbff 100%);
     background-attachment: fixed;
 }
 
-/* 태양 */
-.sun {
-    position: fixed; top: 8%; right: 10%;
-    width: 90px; height: 90px; border-radius: 50%;
-    background: radial-gradient(circle, #fff7c2 0%, #ffe066 50%, #ffcc33 100%);
-    box-shadow: 0 0 60px rgba(255,204,51,0.7), 0 0 120px rgba(255,224,102,0.5);
-    z-index: 0; pointer-events: none;
-    animation: sunPulse 5s ease-in-out infinite;
+/* ===== 모든 글씨에 외곽선 (가독성!) ===== */
+h1, h2, h3, h4, p, span, label, .stMarkdown, div[data-testid="stMetricValue"],
+div[data-testid="stMetricLabel"], .stCaption, .stSelectbox label {
+    text-shadow:
+        -1px -1px 0 #ffffff, 1px -1px 0 #ffffff,
+        -1px  1px 0 #ffffff, 1px  1px 0 #ffffff,
+         0px  0px 4px rgba(255,255,255,0.9) !important;
 }
-@keyframes sunPulse {
-    0%,100% { box-shadow: 0 0 60px rgba(255,204,51,0.7), 0 0 120px rgba(255,224,102,0.5);}
-    50% { box-shadow: 0 0 80px rgba(255,204,51,0.9), 0 0 160px rgba(255,224,102,0.7);}
+h1, h2, h3 { color: #0a2e4d !important; }
+.stMarkdown p, label { color: #103a5e !important; font-weight: 600; }
+
+/* ===== 화면 하단 회전하는 반쪽 지구 (스크롤 고정) ===== */
+.earth {
+    position: fixed;
+    bottom: -360px;          /* 절반만 보이게 아래로 내림 */
+    left: 50%;
+    transform: translateX(-50%);
+    width: 700px; height: 700px;
+    border-radius: 50%;
+    background:
+        radial-gradient(circle at 35% 30%, rgba(255,255,255,0.5) 0%, transparent 35%),
+        linear-gradient(180deg, #2196f3 0%, #1976d2 100%);
+    box-shadow: 0 0 80px rgba(33,150,243,0.5), inset -30px -30px 80px rgba(0,0,0,0.25);
+    z-index: 0;
+    pointer-events: none;
+    overflow: hidden;
+    animation: spinEarth 40s linear infinite;
+}
+/* 대륙 무늬 */
+.earth::before {
+    content: '';
+    position: absolute; top: 18%; left: 12%;
+    width: 180px; height: 120px;
+    background: #43a047; border-radius: 45% 55% 60% 40%;
+    box-shadow: 220px 90px 0 -10px #66bb6a,
+                120px 260px 0 -5px #43a047,
+                360px 200px 0 -20px #66bb6a,
+                40px 380px 0 -15px #4caf50;
+    opacity: 0.85;
+}
+.earth::after {
+    content: '';
+    position: absolute; bottom: 15%; right: 15%;
+    width: 140px; height: 100px;
+    background: #4caf50; border-radius: 50% 40% 55% 45%;
+    box-shadow: -260px -40px 0 -15px #66bb6a, -100px 120px 0 -10px #43a047;
+    opacity: 0.8;
+}
+@keyframes spinEarth {
+    from { transform: translateX(-50%) rotate(0deg); }
+    to   { transform: translateX(-50%) rotate(360deg); }
 }
 
-/* 떠다니는 구름 */
-.cloud {
-    position: fixed; z-index: 0; pointer-events: none;
-    background: #ffffff; border-radius: 100px; opacity: 0.85;
-    box-shadow: 0 8px 20px rgba(0,0,0,0.06);
-}
-.cloud::before, .cloud::after {
-    content:''; position:absolute; background:#fff; border-radius:50%;
-}
-.cloud1 { width:120px; height:40px; top:18%; left:-150px;
-          animation: drift1 40s linear infinite; }
-.cloud1::before { width:55px; height:55px; top:-25px; left:20px; }
-.cloud1::after  { width:40px; height:40px; top:-15px; left:65px; }
-.cloud2 { width:90px; height:30px; top:35%; left:-150px;
-          animation: drift2 55s linear infinite; }
-.cloud2::before { width:42px; height:42px; top:-20px; left:15px; }
-.cloud2::after  { width:32px; height:32px; top:-12px; left:50px; }
-.cloud3 { width:140px; height:45px; top:55%; left:-200px;
-          animation: drift1 65s linear infinite; }
-.cloud3::before { width:60px; height:60px; top:-28px; left:25px; }
-.cloud3::after  { width:45px; height:45px; top:-18px; left:75px; }
-@keyframes drift1 { from{transform:translateX(0);} to{transform:translateX(calc(100vw + 300px));} }
-@keyframes drift2 { from{transform:translateX(0);} to{transform:translateX(calc(100vw + 300px));} }
+/* 구름 */
+.cloud { position: fixed; z-index: 0; pointer-events: none;
+         background:#fff; border-radius:100px; opacity:0.85; }
+.cloud::before, .cloud::after { content:''; position:absolute; background:#fff; border-radius:50%; }
+.cloud1 { width:120px;height:40px;top:12%;left:-150px; animation:drift 45s linear infinite; }
+.cloud1::before{width:55px;height:55px;top:-25px;left:20px;}
+.cloud1::after{width:40px;height:40px;top:-15px;left:65px;}
+.cloud2 { width:90px;height:30px;top:28%;left:-150px; animation:drift 60s linear infinite; }
+.cloud2::before{width:42px;height:42px;top:-20px;left:15px;}
+.cloud2::after{width:32px;height:32px;top:-12px;left:50px;}
+@keyframes drift { from{transform:translateX(0);} to{transform:translateX(calc(100vw + 300px));} }
 
-/* 떠다니는 잎사귀/원형 도형 (지구 자연 느낌) */
-.leaf {
-    position: fixed; z-index: 0; pointer-events: none;
-    font-size: 28px; opacity: 0.55;
-    animation: floatLeaf 18s ease-in-out infinite;
-}
-.leaf1 { top:70%; left:8%;  animation-delay:0s; }
-.leaf2 { top:25%; left:85%; animation-delay:4s; }
-.leaf3 { top:80%; left:60%; animation-delay:8s; }
-.leaf4 { top:45%; left:30%; animation-delay:12s; }
-@keyframes floatLeaf {
-    0%,100% { transform: translateY(0) rotate(0deg); }
-    50% { transform: translateY(-40px) rotate(25deg); }
-}
-
-/* 콘텐츠는 항상 배경 위로 (가독성!) */
 .main .block-container { position: relative; z-index: 1; }
 
-/* 제목/텍스트 색 (밝은 배경이라 어둡게) */
-h1, h2, h3 { color: #0d3b5e !important; text-shadow: 0 1px 2px rgba(255,255,255,0.6); }
-.stMarkdown p, label { color: #1a4a6e !important; }
-
 /* 사이드바 */
-[data-testid="stSidebar"] {
-    background: linear-gradient(180deg, #1565c0 0%, #0d47a1 100%);
-}
-[data-testid="stSidebar"] * { color: #ffffff !important; }
+[data-testid="stSidebar"] { background: linear-gradient(180deg, #1565c0 0%, #0d47a1 100%); }
+[data-testid="stSidebar"] * { color:#fff !important;
+    text-shadow: 1px 1px 2px rgba(0,0,0,0.4) !important; }
 
-/* ===== 멋진 시계 박스 ===== */
-.clock-box {
-    background: linear-gradient(135deg, #1976d2 0%, #42a5f5 60%, #29b6f6 100%);
-    border-radius: 28px;
-    padding: 28px 30px;
-    margin-bottom: 24px;
-    box-shadow: 0 10px 35px rgba(25,118,210,0.4), inset 0 2px 10px rgba(255,255,255,0.3);
-    position: relative;
-    overflow: hidden;
-    border: 3px solid rgba(255,255,255,0.5);
+/* ===== 애니메이션 시계 ===== */
+.clock-wrap {
+    display:flex; align-items:center; gap:30px;
+    background: linear-gradient(135deg,#42a5f5,#1976d2);
+    border-radius:30px; padding:24px 36px; margin-bottom:24px;
+    box-shadow:0 12px 35px rgba(25,118,210,0.45), inset 0 2px 12px rgba(255,255,255,0.3);
+    border:3px solid rgba(255,255,255,0.6);
 }
-.clock-box::before {
-    content:''; position:absolute; top:-40px; right:-40px;
-    width:160px; height:160px; border-radius:50%;
-    background: rgba(255,255,255,0.15);
-}
-.clock-box::after {
-    content:''; position:absolute; bottom:-50px; left:-30px;
-    width:130px; height:130px; border-radius:50%;
-    background: rgba(255,255,255,0.1);
-}
-.clock-time {
-    font-size: 54px; font-weight: 900; color: #ffffff; margin:0;
-    text-shadow: 0 2px 8px rgba(0,0,0,0.25); letter-spacing: 2px;
-    position: relative; z-index: 2;
-}
-.clock-date { font-size: 18px; color: #e3f2fd; margin:4px 0 0 0; position: relative; z-index: 2; }
-.clock-slot {
-    display:inline-block; margin-top:14px; padding:8px 22px;
-    background: rgba(255,255,255,0.95); border-radius: 30px;
-    font-size: 20px; font-weight: 800; color: #0d47a1;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.15); position: relative; z-index: 2;
-}
-
-/* ===== 반별 상태 카드 (불투명!) ===== */
-.class-card {
-    border-radius: 22px;
-    padding: 20px;
-    margin-bottom: 8px;
-    color: #ffffff;
-    box-shadow: 0 8px 24px rgba(0,0,0,0.2);
-    border: 3px solid rgba(255,255,255,0.6);
-    position: relative;
-    overflow: hidden;
-}
-.class-card::before {
-    content:''; position:absolute; top:-30px; right:-30px;
+.analog {
     width:110px; height:110px; border-radius:50%;
-    background: rgba(255,255,255,0.12);
+    background: radial-gradient(circle,#fff 0%,#e3f2fd 100%);
+    border:6px solid #fff; position:relative; flex-shrink:0;
+    box-shadow:0 4px 15px rgba(0,0,0,0.25), inset 0 0 10px rgba(0,0,0,0.1);
 }
-.cc-name { font-size: 26px; font-weight: 900; margin:0; }
-.cc-subject { font-size: 15px; opacity: 0.95; margin:2px 0 10px 0; }
-.cc-status { font-size: 19px; font-weight: 800; margin:6px 0; }
-.cc-reason { font-size: 13px; opacity: 0.92; margin-bottom:10px; }
-.cc-data { font-size: 15px; font-weight: 600;
-           background: rgba(255,255,255,0.18); border-radius: 12px; padding: 8px 10px; }
+.analog .center { position:absolute; top:50%; left:50%;
+    width:10px; height:10px; background:#0d47a1; border-radius:50%;
+    transform:translate(-50%,-50%); z-index:5; }
+.hand { position:absolute; bottom:50%; left:50%; transform-origin:bottom center;
+    border-radius:10px; }
+.hour { width:5px; height:28px; background:#0d47a1; margin-left:-2.5px;
+    animation:spinH 43200s linear infinite; }
+.minute { width:4px; height:40px; background:#1976d2; margin-left:-2px;
+    animation:spinM 3600s linear infinite; }
+.second { width:2px; height:45px; background:#e53935; margin-left:-1px;
+    animation:spinS 60s linear infinite; }
+@keyframes spinS { from{transform:rotate(0);} to{transform:rotate(360deg);} }
+@keyframes spinM { from{transform:rotate(0);} to{transform:rotate(360deg);} }
+@keyframes spinH { from{transform:rotate(0);} to{transform:rotate(360deg);} }
+/* 시계 눈금 */
+.tick { position:absolute; width:2px; height:8px; background:#90caf9; left:50%; top:4px;
+    margin-left:-1px; transform-origin:50% 51px; }
 
-/* 일반 정보 박스 */
-.info-card {
-    background: #ffffff;
-    border-radius: 20px;
-    padding: 22px;
-    box-shadow: 0 6px 20px rgba(0,0,0,0.1);
-    border: 2px solid #e0f0ff;
-    margin-bottom: 12px;
+.clock-digital { color:#fff; }
+.clock-time { font-size:48px; font-weight:900; margin:0; letter-spacing:2px;
+    text-shadow:0 2px 6px rgba(0,0,0,0.3) !important; }
+.clock-date { font-size:17px; margin:2px 0 0 0; color:#e3f2fd; }
+.clock-slot { display:inline-block; margin-top:10px; padding:7px 20px;
+    background:rgba(255,255,255,0.95); border-radius:30px;
+    font-size:18px; font-weight:800; color:#0d47a1;
+    text-shadow:none !important; }
+
+/* ===== 반별 카드 (불투명 + hover 붕) ===== */
+.class-card {
+    border-radius:22px; padding:20px; margin-bottom:14px; color:#fff;
+    box-shadow:0 8px 24px rgba(0,0,0,0.2);
+    border:3px solid rgba(255,255,255,0.6); position:relative; overflow:hidden;
+    transition: transform 0.3s ease, box-shadow 0.3s ease;
 }
+.class-card:hover {
+    transform: translateY(-12px) scale(1.03);
+    box-shadow:0 20px 40px rgba(0,0,0,0.35);
+}
+.class-card::before { content:''; position:absolute; top:-30px; right:-30px;
+    width:110px; height:110px; border-radius:50%; background:rgba(255,255,255,0.12); }
+.class-card p { text-shadow: 1px 1px 2px rgba(0,0,0,0.4) !important; }
+.cc-name { font-size:26px; font-weight:900; margin:0; }
+.cc-subject { font-size:15px; opacity:0.95; margin:2px 0 10px 0; }
+.cc-status { font-size:19px; font-weight:800; margin:6px 0; }
+.cc-reason { font-size:13px; opacity:0.92; margin-bottom:10px; }
+.cc-data { font-size:15px; font-weight:600;
+    background:rgba(0,0,0,0.18); border-radius:12px; padding:8px 10px; }
+
+.info-card {
+    background:#ffffff; border-radius:20px; padding:22px;
+    box-shadow:0 6px 20px rgba(0,0,0,0.1); border:2px solid #e0f0ff; margin-bottom:12px;
+    transition: transform 0.3s ease, box-shadow 0.3s ease;
+}
+.info-card:hover { transform: translateY(-6px); box-shadow:0 14px 30px rgba(0,0,0,0.18); }
+.info-card p, .info-card b, .info-card span { text-shadow:none !important; }
+
+/* 시간표 */
+.tt-table { width:100%; border-collapse:separate; border-spacing:0;
+    background:#fff; border-radius:18px; overflow:hidden;
+    box-shadow:0 8px 24px rgba(0,0,0,0.15); }
+.tt-table th { background:linear-gradient(135deg,#1976d2,#42a5f5); color:#fff;
+    padding:14px; font-size:16px; text-shadow:1px 1px 2px rgba(0,0,0,0.3) !important; }
+.tt-table td { padding:14px; text-align:center; border-bottom:1px solid #e3f2fd;
+    color:#0d3b5e; font-weight:600; text-shadow:none !important; }
+.tt-period { background:#e3f2fd; font-weight:800; color:#0d47a1; }
+.tt-now { background:#fff3e0 !important; box-shadow:inset 0 0 0 3px #ff5722; }
+.tt-break td { background:#f5f5f5; color:#999; font-size:13px; }
+.tt-lunch td { background:#fff8e1; color:#f57f17; font-weight:800; }
+.tt-home td { background:#e8f5e9; color:#2e7d32; font-weight:800; }
 </style>
 
-<div class="sun"></div>
+<div class="earth"></div>
 <div class="cloud cloud1"></div>
 <div class="cloud cloud2"></div>
-<div class="cloud cloud3"></div>
-<div class="leaf leaf1">🍃</div>
-<div class="leaf leaf2">🌿</div>
-<div class="leaf leaf3">🍃</div>
-<div class="leaf leaf4">🌎</div>
 """, unsafe_allow_html=True)
 
 
-# ========================================
-# 현재 시각 / 일정
-# ========================================
 now = datetime.now()
 slot_name, slot_kind = get_current_slot(now)
 
 
-# ========================================
 # 사이드바
-# ========================================
 st.sidebar.title("🌍 에너지 모니터링")
 page = st.sidebar.radio(
     "페이지 선택",
     ["🏠 대시보드 홈", "📊 반별 상세", "🏆 에너지 랭킹",
-     "📅 오늘의 시간표", "💡 에너지 리포트", "ℹ️ 시스템 정보"]
+     "📅 오늘의 시간표", "💡 에너지 리포트", "🎯 프로젝트 목표"]
 )
 st.sidebar.divider()
 st.sidebar.caption(f"총 데이터: {len(df)}개")
@@ -347,31 +396,54 @@ st.sidebar.caption("⏱️ 30초마다 자동 갱신")
 
 
 # ========================================
-# 페이지 1: 대시보드 홈
+# 애니메이션 시계 HTML 생성 함수
 # ========================================
-if page == "🏠 대시보드 홈":
+def render_clock(now, slot_name, slot_kind):
+    slot_icons = {"class":"📚","break":"☕","lunch":"🍱","homeroom":"📢",
+                  "after":"🏠","before":"🌅","weekend":"🌴"}
+    icon = slot_icons.get(slot_kind, "🕐")
     weekday_name = WEEKDAY_KR[now.weekday()]
 
-    # 일정 종류별 아이콘
-    slot_icons = {
-        "class": "📚", "break": "☕", "lunch": "🍱",
-        "homeroom": "📢", "after": "🏠", "before": "🌅",
-        "weekend": "🌴",
-    }
-    icon = slot_icons.get(slot_kind, "🕐")
+    # 현재 시각에 맞춰 시계바늘 시작 각도 계산
+    h = now.hour % 12
+    m = now.minute
+    s = now.second
+    sec_deg = s * 6
+    min_deg = m * 6 + s * 0.1
+    hour_deg = h * 30 + m * 0.5
 
-    st.markdown(f"""
-    <div class="clock-box">
-        <p class="clock-time">{now.strftime('%H:%M:%S')}</p>
-        <p class="clock-date">{now.strftime('%Y년 %m월 %d일')} ({weekday_name}요일)</p>
-        <span class="clock-slot">{icon} {slot_name}</span>
+    # 눈금 12개
+    ticks = "".join(
+        f'<div class="tick" style="transform:rotate({i*30}deg);"></div>'
+        for i in range(12)
+    )
+
+    return f"""
+    <div class="clock-wrap">
+        <div class="analog">
+            {ticks}
+            <div class="hand hour" style="animation-delay:-{hour_deg/360*43200}s;"></div>
+            <div class="hand minute" style="animation-delay:-{min_deg/360*3600}s;"></div>
+            <div class="hand second" style="animation-delay:-{sec_deg/360*60}s;"></div>
+            <div class="center"></div>
+        </div>
+        <div class="clock-digital">
+            <p class="clock-time">{now.strftime('%H:%M:%S')}</p>
+            <p class="clock-date">{now.strftime('%Y년 %m월 %d일')} ({weekday_name}요일)</p>
+            <span class="clock-slot">{icon} {slot_name}</span>
+        </div>
     </div>
-    """, unsafe_allow_html=True)
+    """
 
+
+# ========================================
+# 페이지 1: 홈
+# ========================================
+if page == "🏠 대시보드 홈":
+    st.markdown(render_clock(now, slot_name, slot_kind), unsafe_allow_html=True)
     st.title("🏠 전체 교실 현황")
 
     latest = df.groupby("반").last().reset_index()
-
     total = len(latest)
     waste = sum(1 for _, r in latest.iterrows()
                 if check_status(r["온도"], r["co2"], r["반"], now)[2] in ["red", "gold"])
@@ -413,7 +485,6 @@ if page == "🏠 대시보드 홈":
 # ========================================
 elif page == "📊 반별 상세":
     st.title("📊 반별 상세 그래프")
-
     class_list = sorted(df["반"].unique().tolist())
     selected = st.selectbox("반을 선택하세요", class_list)
     class_df = df[df["반"] == selected].copy().reset_index(drop=True)
@@ -422,7 +493,6 @@ elif page == "📊 반별 상세":
     latest_row = class_df.iloc[-1]
     status, reason, color = check_status(latest_row["온도"], latest_row["co2"], selected, now)
     subject = get_subject(selected, now, slot_name)
-
     st.markdown(f"## {selected}반 — {status}")
     st.caption(f"{reason} · 현재: {subject or slot_name} · 데이터 {len(class_df)}개")
 
@@ -431,24 +501,21 @@ elif page == "📊 반별 상세":
     c2.metric("🌡️ 온도", f"{latest_row['온도']} °C")
     c3.metric("💧 습도", f"{latest_row['습도']} %")
     c4.metric("🔥 가스", f"{latest_row['가스']}")
-
     st.divider()
 
     def make_chart(y_col, title, color):
         fig = px.line(class_df, x="측정순번", y=y_col, title=title, markers=True)
-        fig.update_traces(line_color=color, line_width=3,
-                          marker=dict(size=7, color=color))
+        fig.update_traces(line_color=color, line_width=3, marker=dict(size=7, color=color))
         fig.update_layout(
-            plot_bgcolor="rgba(255,255,255,0.85)",
-            paper_bgcolor="rgba(255,255,255,0)",
-            font_color="#0d3b5e",
-            title_font_size=18,
+            plot_bgcolor="rgba(255,255,255,0.95)",
+            paper_bgcolor="rgba(255,255,255,0.6)",
+            font_color="#0a2e4d", font_size=13,
+            title_font_size=18, title_font_color="#0a2e4d",
             xaxis_title="측정 순번",
-            margin=dict(l=20, r=20, t=50, b=20),
-            height=300,
+            margin=dict(l=20, r=20, t=50, b=20), height=300,
         )
-        fig.update_xaxes(showgrid=True, gridcolor="rgba(13,59,94,0.1)")
-        fig.update_yaxes(showgrid=True, gridcolor="rgba(13,59,94,0.1)")
+        fig.update_xaxes(showgrid=True, gridcolor="rgba(13,59,94,0.12)", color="#0a2e4d")
+        fig.update_yaxes(showgrid=True, gridcolor="rgba(13,59,94,0.12)", color="#0a2e4d")
         return fig
 
     col1, col2 = st.columns(2)
@@ -461,47 +528,49 @@ elif page == "📊 반별 상세":
 
 
 # ========================================
-# 페이지 3: 에너지 랭킹
+# 페이지 3: 에너지 랭킹 (정교한 로직)
 # ========================================
 elif page == "🏆 에너지 랭킹":
     st.title("🏆 에너지 절약 랭킹")
-    st.caption("적정 온도(25도)에 가까울수록 높은 점수!")
+    st.caption("온도 적정성(50) + 환기(20) + 측정(20) − 이동수업낭비/변동성 penalty")
 
-    latest = df.groupby("반").last().reset_index()
+    results = []
+    for class_id in df["반"].unique():
+        df_class = df[df["반"] == class_id].reset_index(drop=True)
+        sc, detail = energy_score(class_id, df_class, now)
+        latest = df_class.iloc[-1]
+        results.append((class_id, sc, detail, latest))
 
-    def score(temp):
-        if pd.isna(temp):
-            return 0
-        return max(0, 100 - abs(temp - 25) * 10)
+    results.sort(key=lambda x: x[1], reverse=True)
 
-    latest["점수"] = latest["온도"].apply(score)
-    ranked = latest.sort_values("점수", ascending=False).reset_index(drop=True)
-
-    for idx, row in ranked.iterrows():
+    for idx, (class_id, sc, detail, latest) in enumerate(results):
         medal = ["🥇", "🥈", "🥉"][idx] if idx < 3 else f"{idx+1}위"
-        status, reason, color = check_status(row["온도"], row["co2"], row["반"], now)
+        status, reason, color = check_status(latest["온도"], latest["co2"], class_id, now)
         bg = COLOR_HEX.get(color, "#757575")
+
+        # 점수 상세 문자열
+        detail_str = " · ".join(f"{k} {v}" for k, v in detail.items())
+
         st.markdown(f"""
-        <div class="class-card" style="background:{bg}; display:flex; align-items:center;">
-            <div style="font-size:38px; margin-right:20px;">{medal}</div>
-            <div style="flex:2;">
-                <p class="cc-name">{row['반']}</p>
-                <p class="cc-subject">{int(row['점수'])}점</p>
-            </div>
-            <div style="flex:3;">
-                <p class="cc-status">{status}</p>
-                <p class="cc-reason">🌡️ {row['온도']}°C · {reason}</p>
+        <div class="class-card" style="background:{bg};">
+            <div style="display:flex; align-items:center;">
+                <div style="font-size:40px; margin-right:20px;">{medal}</div>
+                <div style="flex:1;">
+                    <p class="cc-name">{class_id} <span style="font-size:22px;">— {sc}점</span></p>
+                    <p class="cc-status">{status}</p>
+                    <p class="cc-reason">🌡️ {latest['온도']}°C · 🫁 {latest['co2']}ppm · {reason}</p>
+                    <div class="cc-data">📊 {detail_str}</div>
+                </div>
             </div>
         </div>
         """, unsafe_allow_html=True)
 
 
 # ========================================
-# 페이지 4: 오늘의 시간표
+# 페이지 4: 오늘의 시간표 (진짜 표)
 # ========================================
 elif page == "📅 오늘의 시간표":
     st.title("📅 오늘의 시간표")
-
     class_list = sorted(TIMETABLE.keys())
     selected = st.selectbox("반 선택", class_list)
 
@@ -513,33 +582,46 @@ elif page == "📅 오늘의 시간표":
         st.subheader(f"{selected}반 · {day}요일")
         schedule = DAY_SCHEDULE[weekday]
 
+        rows_html = ""
         for name, start, end, kind in schedule:
             subject = TIMETABLE.get(selected, {}).get(day, {}).get(name, "")
             time_str = f"{start.strftime('%H:%M')} ~ {end.strftime('%H:%M')}"
-
-            # 현재 진행 중인 시간 강조
             is_now = (start <= now.time() < end)
-            highlight = "border:3px solid #ff5722; box-shadow:0 0 15px rgba(255,87,34,0.4);" if is_now else ""
 
-            label = name
-            if subject:
-                label = f"{name} · {subject}"
-            now_tag = " 🔴 진행중" if is_now else ""
+            row_class = ""
+            if kind == "break":
+                row_class = "tt-break"
+            elif kind == "lunch":
+                row_class = "tt-lunch"
+            elif kind == "homeroom":
+                row_class = "tt-home"
+            if is_now:
+                row_class += " tt-now"
 
-            st.markdown(f"""
-            <div class="info-card" style="{highlight}">
-                <b style="color:#0d3b5e; font-size:18px;">{label}{now_tag}</b><br>
-                <span style="color:#1a4a6e;">🕐 {time_str}</span>
-            </div>
-            """, unsafe_allow_html=True)
+            now_tag = " 🔴" if is_now else ""
+            display = subject if subject else name
+
+            rows_html += f"""
+            <tr class="{row_class}">
+                <td class="tt-period">{name}{now_tag}</td>
+                <td>{time_str}</td>
+                <td>{display}</td>
+            </tr>
+            """
+
+        st.markdown(f"""
+        <table class="tt-table">
+            <tr><th>구분</th><th>시간</th><th>과목/내용</th></tr>
+            {rows_html}
+        </table>
+        """, unsafe_allow_html=True)
 
 
 # ========================================
-# 페이지 5: 에너지 리포트
+# 페이지 5: 에너지 리포트 (예쁜 그래프)
 # ========================================
 elif page == "💡 에너지 리포트":
     st.title("💡 에너지 절약 리포트")
-    st.caption("전체 데이터를 분석한 통계입니다.")
 
     if df["온도"].notna().sum() == 0:
         st.warning("아직 분석할 데이터가 부족해요.")
@@ -548,66 +630,80 @@ elif page == "💡 에너지 리포트":
         c1.metric("🌡️ 평균 온도", f"{df['온도'].mean():.1f} °C")
         c2.metric("🫁 평균 CO₂", f"{df['co2'].mean():.0f} ppm")
         c3.metric("💧 평균 습도", f"{df['습도'].mean():.1f} %")
-
         st.divider()
 
-        # 반별 평균 온도 막대그래프
+        common_layout = dict(
+            plot_bgcolor="rgba(255,255,255,0.95)",
+            paper_bgcolor="rgba(255,255,255,0.6)",
+            font_color="#0a2e4d", font_size=13,
+            margin=dict(l=20, r=20, t=50, b=20),
+        )
+
         st.subheader("📊 반별 평균 온도")
         avg_temp = df.groupby("반")["온도"].mean().reset_index()
         fig = px.bar(avg_temp, x="반", y="온도", color="온도",
-                     color_continuous_scale="RdYlBu_r")
-        fig.update_layout(
-            plot_bgcolor="rgba(255,255,255,0.85)",
-            paper_bgcolor="rgba(255,255,255,0)",
-            font_color="#0d3b5e", height=350,
-            margin=dict(l=20, r=20, t=30, b=20),
-        )
+                     color_continuous_scale="Tealrose", text_auto=".1f")
+        fig.update_traces(marker_line_width=2, marker_line_color="white",
+                          textfont_size=14, textposition="outside")
+        fig.update_layout(height=350, title="반별 평균 온도 (°C)", **common_layout)
+        fig.update_xaxes(color="#0a2e4d"); fig.update_yaxes(color="#0a2e4d")
         st.plotly_chart(fig, use_container_width=True)
 
-        # 온도 분포
-        st.subheader("🌡️ 온도 분포")
-        fig2 = px.histogram(df, x="온도", nbins=20, color_discrete_sequence=["#42a5f5"])
-        fig2.update_layout(
-            plot_bgcolor="rgba(255,255,255,0.85)",
-            paper_bgcolor="rgba(255,255,255,0)",
-            font_color="#0d3b5e", height=300,
-            margin=dict(l=20, r=20, t=30, b=20),
-        )
-        st.plotly_chart(fig2, use_container_width=True)
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("🌡️ 온도 분포")
+            fig2 = px.histogram(df, x="온도", nbins=15,
+                                color_discrete_sequence=["#42a5f5"])
+            fig2.update_traces(marker_line_width=1, marker_line_color="white")
+            fig2.update_layout(height=320, **common_layout)
+            fig2.update_xaxes(color="#0a2e4d"); fig2.update_yaxes(color="#0a2e4d")
+            st.plotly_chart(fig2, use_container_width=True)
+        with col2:
+            st.subheader("🫁 반별 평균 CO₂")
+            avg_co2 = df.groupby("반")["co2"].mean().reset_index()
+            fig3 = px.bar(avg_co2, x="반", y="co2", color="co2",
+                          color_continuous_scale="Sunsetdark", text_auto=".0f")
+            fig3.update_traces(marker_line_width=2, marker_line_color="white",
+                               textposition="outside")
+            fig3.update_layout(height=320, **common_layout)
+            fig3.update_xaxes(color="#0a2e4d"); fig3.update_yaxes(color="#0a2e4d")
+            st.plotly_chart(fig3, use_container_width=True)
 
 
 # ========================================
-# 페이지 6: 시스템 정보
+# 페이지 6: 프로젝트 목표
 # ========================================
-elif page == "ℹ️ 시스템 정보":
-    st.title("ℹ️ 시스템 정보")
+elif page == "🎯 프로젝트 목표":
+    st.title("🎯 프로젝트 목표")
 
     st.markdown("""
     <div class="info-card">
-    <h3>🌍 교실 에너지 모니터링 시스템</h3>
-    <p>라즈베리파이 피코 + 센서로 각 교실의 환경을 실시간 측정하고,
-    에너지 낭비를 감지하는 시스템입니다.</p>
+        <h3>🌍 우리의 비전</h3>
+        <p>학교 교실의 에너지 낭비를 <b>실시간으로 감지</b>하고,
+        모두가 한눈에 볼 수 있게 하여 <b>에너지 절약 문화</b>를 만든다!</p>
     </div>
     """, unsafe_allow_html=True)
 
-    st.subheader("📡 측정 항목")
-    st.markdown("""
-    - 🫁 **CO₂ 농도** (SCD30 센서) — 사람 유무 추정
-    - 🌡️ **온도 / 습도** (SCD30 센서) — 냉난방 상태
-    - 🔥 **가스 농도** (MQ-2 센서) — 공기질
-    """)
+    goals = [
+        ("🔋", "에너지 낭비 감지", "이동수업·빈 교실에 냉방 켜둔 상황을 자동 감지해 낭비를 줄인다."),
+        ("📊", "데이터 기반 의사결정", "감(感)이 아닌 실제 센서 데이터로 냉난방을 관리한다."),
+        ("🌡️", "쾌적한 학습 환경", "적정 온도·습도·CO₂를 유지해 집중도를 높인다."),
+        ("🏆", "절약 동기 부여", "반별 에너지 점수와 랭킹으로 자발적 절약을 유도한다."),
+        ("🌱", "환경 보호 실천", "작은 절약이 모여 탄소 배출을 줄이고 지구를 지킨다."),
+    ]
+    for icon, title, desc in goals:
+        st.markdown(f"""
+        <div class="info-card">
+            <h3>{icon} {title}</h3>
+            <p>{desc}</p>
+        </div>
+        """, unsafe_allow_html=True)
 
-    st.subheader("⚡ 에너지 낭비 판단 기준")
     st.markdown("""
-    - 🔴 **과냉방**: 온도 22도 미만 + 사람 있음
-    - 🟡 **빈 교실 냉방**: 온도 낮은데 사람 없음
-    - 🔴 **이동수업 낭비**: 체육 등 이동수업인데 냉방 켜둠
-    - ⚪ **냉방 안 함**: 온도 29도 이상
-    - 🟢 **정상**: 22~28도
-    """)
-
-    st.subheader("🔄 데이터 흐름")
-    st.markdown("""
-    `피코(센서)` → `구글 시트` → `이 대시보드`
-    (30초마다 자동 갱신)
-    """)
+    <div class="info-card">
+        <h3>📡 작동 원리</h3>
+        <p><b>라즈베리파이 피코 + SCD30 + MQ-2 센서</b>로 교실 환경을 측정 →
+        <b>구글 시트</b>에 저장 → <b>이 대시보드</b>에서 실시간 분석!
+        (30초마다 자동 갱신)</p>
+    </div>
+    """, unsafe_allow_html=True)
